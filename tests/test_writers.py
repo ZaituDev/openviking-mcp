@@ -316,6 +316,30 @@ class TestWriteDecision(unittest.TestCase):
             self.assertIn("error", res)
             self.assertEqual(res.get("status"), "not-implemented")
 
+    def test_write_decision_trims_desc_in_linked_research(self) -> None:
+        r1 = "viking://resources/project/research/ideas/untrimmed.md"
+        self.fake_client.files[r1] = "# Untrimmed"
+        source_research = [{"uri": r1, "desc": "   Padded description   "}]
+
+        with patch.object(braining_server, "OpenVikingClient", return_value=self.fake_client):
+            res = braining_server.write_decision(
+                context="Context",
+                problem="Problem",
+                alternatives="Alt",
+                decision="Dec",
+                consequences="Cons",
+                source_research=source_research,
+            )
+            self.assertEqual(
+                res["linked_research"],
+                [{"uri": r1, "desc": "Padded description"}],
+            )
+            dec_uri = res["uri"]
+            self.assertEqual(
+                self.fake_client.get_relations(r1),
+                [{"uri": dec_uri, "reason": "produces, Padded description"}],
+            )
+
 
 class TestSupersedeDecision(unittest.TestCase):
     """Test supersede_decision requiring relation_desc and reciprocal supersedes/superseded_by."""
@@ -449,6 +473,62 @@ class TestSupersedeDecision(unittest.TestCase):
 
                 # No relations exist
                 self.assertEqual(self.fake_client.relations, [])
+
+    def test_supersede_decision_rejects_non_decision_uri_upfront(self) -> None:
+        arch_uri = "viking://resources/project/architecture/overview.md"
+        self.fake_client.files[arch_uri] = "# Living Architecture"
+        initial_file_count = len(self.fake_client.files)
+
+        with patch.object(braining_server, "OpenVikingClient", return_value=self.fake_client):
+            res = braining_server.supersede_decision(
+                old_dec_uri=arch_uri,
+                context="New context",
+                problem="New problem",
+                alternatives="New alt",
+                decision="New dec",
+                consequences="New cons",
+                relation_desc="Should be rejected upfront",
+            )
+            self.assertIn("error", res)
+            self.assertIn("old_dec_uri", res["error"])
+            # The architecture file was NOT overwritten
+            self.assertEqual(self.fake_client.files[arch_uri], "# Living Architecture")
+            # No new decision files were created
+            self.assertEqual(len(self.fake_client.files), initial_file_count)
+
+    def test_supersede_decision_rejects_non_md_uri_upfront(self) -> None:
+        non_md_uri = "viking://resources/project/decisions/DEC-0001"
+        initial_file_count = len(self.fake_client.files)
+
+        with patch.object(braining_server, "OpenVikingClient", return_value=self.fake_client):
+            res = braining_server.supersede_decision(
+                old_dec_uri=non_md_uri,
+                context="New context",
+                problem="New problem",
+                alternatives="New alt",
+                decision="New dec",
+                consequences="New cons",
+                relation_desc="Should be rejected upfront",
+            )
+            self.assertIn("error", res)
+            self.assertEqual(len(self.fake_client.files), initial_file_count)
+
+    def test_supersede_decision_rejects_traversal_uri_upfront(self) -> None:
+        traversal_uri = "viking://resources/project/decisions/../decisions/DEC-0001.md"
+        initial_file_count = len(self.fake_client.files)
+
+        with patch.object(braining_server, "OpenVikingClient", return_value=self.fake_client):
+            res = braining_server.supersede_decision(
+                old_dec_uri=traversal_uri,
+                context="New context",
+                problem="New problem",
+                alternatives="New alt",
+                decision="New dec",
+                consequences="New cons",
+                relation_desc="Should be rejected upfront",
+            )
+            self.assertIn("error", res)
+            self.assertEqual(len(self.fake_client.files), initial_file_count)
 
 
 class TestWriteAudit(unittest.TestCase):

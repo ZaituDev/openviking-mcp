@@ -34,12 +34,27 @@ from decision_frontmatter import (  # noqa: E402
     next_decision_number,
     with_status,
 )
-from relation_domain import set_reciprocal_relation  # noqa: E402
+from relation_domain import (  # noqa: E402
+    set_reciprocal_relation,
+    validate_endpoint_uri,
+)
 
 PROJECT_ROOT = "viking://resources/project"
 DECISIONS_URI = f"{PROJECT_ROOT}/decisions"
 INVARIANTS_URI = f"{PROJECT_ROOT}/invariants"
 RESEARCH_URI = f"{PROJECT_ROOT}/research"
+
+
+def _validate_decision_uri(dec_uri: str) -> str | None:
+    if not isinstance(dec_uri, str):
+        return f"old_dec_uri must be a string, got {type(dec_uri).__name__}"
+    if not dec_uri.startswith(f"{DECISIONS_URI}/"):
+        return f"old_dec_uri '{dec_uri}' must start with '{DECISIONS_URI}/'"
+    try:
+        validate_endpoint_uri(dec_uri)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 VALID_RESEARCH_CATEGORIES = ("ideas", "debates", "experiments")
 
@@ -197,7 +212,7 @@ def write_decision(
                     }
 
                 item_uri = item["uri"]
-                item_desc = item["desc"]
+                item_desc = item["desc"].strip()
 
                 rel_res = set_reciprocal_relation(
                     client,
@@ -266,6 +281,10 @@ def supersede_decision(
     ]:
         if not value or not value.strip():
             return {"error": f"'{field_name}' is required and cannot be empty."}
+
+    dec_err = _validate_decision_uri(old_dec_uri)
+    if dec_err:
+        return {"error": f"Invalid old_dec_uri: {dec_err}"}
 
     if not isinstance(relation_desc, str):
         return {"error": f"'relation_desc' must be a string, got {type(relation_desc).__name__}."}
