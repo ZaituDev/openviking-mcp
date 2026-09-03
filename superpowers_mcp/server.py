@@ -42,7 +42,6 @@ from decision_frontmatter import (  # noqa: E402
 from relation_domain import (  # noqa: E402
     remove_reciprocal_relation,
     set_reciprocal_relation,
-    validate_endpoint_uri,
 )
 from l2_editor import apply_section_edit  # noqa: E402
 
@@ -335,6 +334,17 @@ def promote_decision(
                     "message": "Action 'set_relation' requires primary, secondary, reason_pair, and desc",
                 },
             }
+        if not isinstance(primary, str) or not isinstance(secondary, str) or not isinstance(reason_pair, str) or not isinstance(desc, str):
+            return {
+                "ok": False,
+                "action": "set_relation",
+                "dec_uri": dec_uri,
+                "changed": False,
+                "error": {
+                    "code": "INVALID_ACTION_FIELDS",
+                    "message": "Action 'set_relation' requires primary, secondary, reason_pair, and desc to be strings",
+                },
+            }
 
     elif action == "remove_relation":
         if any(f is not None for f in (target, target_path, write_mode, content, section, reason_pair, desc)):
@@ -357,6 +367,17 @@ def promote_decision(
                 "error": {
                     "code": "INVALID_ACTION_FIELDS",
                     "message": "Action 'remove_relation' requires primary and secondary",
+                },
+            }
+        if not isinstance(primary, str) or not isinstance(secondary, str):
+            return {
+                "ok": False,
+                "action": "remove_relation",
+                "dec_uri": dec_uri,
+                "changed": False,
+                "error": {
+                    "code": "INVALID_ACTION_FIELDS",
+                    "message": "Action 'remove_relation' requires primary and secondary to be strings",
                 },
             }
 
@@ -795,10 +816,22 @@ def promote_decision(
                 code = "VERIFICATION_FAILURE"
             elif "does not exist" in str(err_msg) or "stat failed" in str(err_msg):
                 code = "ENDPOINT_NOT_FOUND"
-            elif "is a directory" in str(err_msg) or "must start with" in str(err_msg) or "must end with" in str(err_msg):
-                code = "INVALID_ENDPOINT_URI"
-            elif "Invalid topology" in str(err_msg):
+            elif (
+                "must be under" in str(err_msg)
+                or "endpoints cannot be identical" in str(err_msg)
+                or "Invalid topology" in str(err_msg)
+            ):
                 code = "INVALID_TOPOLOGY"
+            elif (
+                "is a directory" in str(err_msg)
+                or "must start with" in str(err_msg)
+                or "must end with" in str(err_msg)
+                or "must be a string" in str(err_msg)
+                or "wildcards" in str(err_msg)
+                or "traversal" in str(err_msg)
+                or "empty path segments" in str(err_msg)
+            ):
+                code = "INVALID_ENDPOINT_URI"
             elif "Description" in str(err_msg) or "desc" in str(err_msg).lower():
                 code = "INVALID_DESCRIPTION"
 
@@ -819,8 +852,20 @@ def promote_decision(
             return set_resp
 
         elif action == "remove_relation":
-            is_dec_primary = primary.startswith(f"{PROJECT_ROOT}/decisions/")  # type: ignore[union-attr]
-            is_dec_secondary = secondary.startswith(f"{PROJECT_ROOT}/decisions/")  # type: ignore[union-attr]
+            if not isinstance(primary, str) or not isinstance(secondary, str):
+                return {
+                    "ok": False,
+                    "action": "remove_relation",
+                    "dec_uri": dec_uri,
+                    "changed": False,
+                    "error": {
+                        "code": "INVALID_ACTION_FIELDS",
+                        "message": "Action 'remove_relation' requires primary and secondary to be strings",
+                    },
+                }
+
+            is_dec_primary = primary.startswith(f"{PROJECT_ROOT}/decisions/")
+            is_dec_secondary = secondary.startswith(f"{PROJECT_ROOT}/decisions/")
             if (is_dec_primary or is_dec_secondary) and primary != dec_uri:
                 return {
                     "ok": False,

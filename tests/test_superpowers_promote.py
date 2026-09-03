@@ -293,6 +293,60 @@ class PromoteDecisionFieldValidationTests(unittest.TestCase):
                     self.assertFalse(res["ok"])
                     self.assertEqual(res["error"]["code"], "INVALID_ACTION_FIELDS")
 
+    def test_set_relation_non_string_fields_rejected(self) -> None:
+        invalid_types = [123, True, [], {}]
+        for val in invalid_types:
+            with self.subTest(primary=val):
+                with patch.object(superpowers_server, "OpenVikingClient", return_value=self.fake_client):
+                    res = superpowers_server.promote_decision(
+                        dec_uri=self.dec_uri,
+                        action="set_relation",
+                        primary=val,  # type: ignore[arg-type]
+                        secondary="viking://resources/project/architecture/overview.md",
+                        reason_pair="promoted_to/derived_from",
+                        desc="desc",
+                    )
+                    self.assertFalse(res["ok"])
+                    self.assertEqual(res["error"]["code"], "INVALID_ACTION_FIELDS")
+
+            with self.subTest(secondary=val):
+                with patch.object(superpowers_server, "OpenVikingClient", return_value=self.fake_client):
+                    res = superpowers_server.promote_decision(
+                        dec_uri=self.dec_uri,
+                        action="set_relation",
+                        primary=self.dec_uri,
+                        secondary=val,  # type: ignore[arg-type]
+                        reason_pair="promoted_to/derived_from",
+                        desc="desc",
+                    )
+                    self.assertFalse(res["ok"])
+                    self.assertEqual(res["error"]["code"], "INVALID_ACTION_FIELDS")
+
+    def test_remove_relation_non_string_fields_rejected(self) -> None:
+        invalid_types = [123, True, [], {}]
+        for val in invalid_types:
+            with self.subTest(primary=val):
+                with patch.object(superpowers_server, "OpenVikingClient", return_value=self.fake_client):
+                    res = superpowers_server.promote_decision(
+                        dec_uri=self.dec_uri,
+                        action="remove_relation",
+                        primary=val,  # type: ignore[arg-type]
+                        secondary="viking://resources/project/architecture/overview.md",
+                    )
+                    self.assertFalse(res["ok"])
+                    self.assertEqual(res["error"]["code"], "INVALID_ACTION_FIELDS")
+
+            with self.subTest(secondary=val):
+                with patch.object(superpowers_server, "OpenVikingClient", return_value=self.fake_client):
+                    res = superpowers_server.promote_decision(
+                        dec_uri=self.dec_uri,
+                        action="remove_relation",
+                        primary=self.dec_uri,
+                        secondary=val,  # type: ignore[arg-type]
+                    )
+                    self.assertFalse(res["ok"])
+                    self.assertEqual(res["error"]["code"], "INVALID_ACTION_FIELDS")
+
     def test_finalize_rejects_any_optional_fields(self) -> None:
         optional_fields = [
             ("target", "architecture"),
@@ -812,6 +866,34 @@ class PromoteDecisionSetRelationTests(unittest.TestCase):
             )
             self.assertTrue(res["ok"])
             self.assertTrue(res["changed"])
+
+    def test_set_relation_invalid_topology_mapping(self) -> None:
+        # composes/part_of requires primary under architecture/ and secondary under domains/
+        # Passing domain as primary and architecture as secondary violates topology
+        with patch.object(superpowers_server, "OpenVikingClient", return_value=self.client):
+            res = superpowers_server.promote_decision(
+                dec_uri=self.dec_uri,
+                action="set_relation",
+                primary=self.domain_uri,
+                secondary=self.arch_uri,
+                reason_pair="composes/part_of",
+                desc="invalid direction",
+            )
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"]["code"], "INVALID_TOPOLOGY")
+
+        # Identical endpoints also violate topology
+        with patch.object(superpowers_server, "OpenVikingClient", return_value=self.client):
+            res = superpowers_server.promote_decision(
+                dec_uri=self.dec_uri,
+                action="set_relation",
+                primary=self.arch_uri,
+                secondary=self.arch_uri,
+                reason_pair="references/referenced_by",
+                desc="self reference",
+            )
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"]["code"], "INVALID_TOPOLOGY")
 
 
 class PromoteDecisionRemoveRelationTests(unittest.TestCase):
