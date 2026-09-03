@@ -7,6 +7,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "shared"))
 
+try:
+    import httpx  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover - normal runtime installs it
+    import types
+
+    class _RequestError(Exception):
+        pass
+
+    sys.modules["httpx"] = types.SimpleNamespace(
+        Client=object,
+        RequestError=_RequestError,
+    )
+    import httpx
+
+from ov_client import OpenVikingClient, OpenVikingError
 from relation_domain import (  # noqa: E402
     RECIPROCAL_PAIRS,
     PARSE_ERROR_EMPTY_FIELD,
@@ -14,7 +29,10 @@ from relation_domain import (  # noqa: E402
     PARSE_ERROR_MISSING_DELIMITER,
     PARSE_ERROR_UNKNOWN_REASON,
     parse_relation_reason,
+    remove_reciprocal_relation,
     serialize_relation_reason,
+    set_reciprocal_relation,
+    snapshot_relations,
     validate_endpoint_uri,
     validate_topology,
 )
@@ -462,5 +480,382 @@ class ParseRelationReasonTests(unittest.TestCase):
                 )
 
 
+
+class FakeOpenVikingClient:
+    def __init__(
+        self,
+        stats: dict[str, dict[str, Any]] | None = None,
+        relations: dict[str, list[dict[str, Any]]] | None = None,
+    ):
+        self.stats = stats or {}
+        self.relations = relations or {}
+        self.link_calls: list[tuple[str, str | list[str], str]] = []
+        self.unlink_calls: list[tuple[str, str]] = []
+        self.stat_calls: list[str] = []
+
+    def stat_resource(self, uri: str) -> dict[str, Any]:
+        self.stat_calls.append(uri)
+        if uri not in self.stats:
+            raise OpenVikingError(f"Resource '{uri}' not found", code="NOT_FOUND")
+        return self.stats[uri]
+
+    def get_relations(self, uri: str) -> list[dict[str, Any]]:
+        return [dict(e) for e in self.relations.get(uri, [])]
+
+    def link(self, from_uri: str, to_uris: str | list[str], reason: str = "") -> dict[str, Any]:
+        self.link_calls.append((from_uri, to_uris, reason))
+        targets = [to_uris] if isinstance(to_uris, str) else to_uris
+        for t in targets:
+            self.relations.setdefault(from_uri, []).append({"uri": t, "reason": reason})
+        return {"ok": True}
+
+    def unlink(self, from_uri: str, to_uri: str) -> dict[str, Any]:
+        self.unlink_calls.append((from_uri, to_uri))
+        if from_uri in self.relations:
+            self.relations[from_uri] = [
+                e for e in self.relations[from_uri] if e.get("uri") != to_uri
+            ]
+        return {"ok": True}
+
+
+class ReciprocalRelationsTransactionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.primary = "viking://resources/project/research/auth-rfc.md"
+        self.secondary = "viking://resources/project/decisions/DEC-0001.md"
+        self.reason_pair = "produces/produced_from"
+        self.desc = "investigates auth options"
+        self.primary_serialized = "produces, investigates auth options"
+        self.secondary_serialized = "produced_from, investigates auth options"
+
+        self.stats = {
+            self.primary: {"name": "auth-rfc.md", "isDir": False},
+            self.secondary: {"name": "DEC-0001.md", "isDir": False},
+        }
+
+    def test_snapshot_relations_extracts_links(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [
+                    {"uri": self.secondary, "reason": "produces, auth"},
+                    {"uri": "viking://resources/project/decisions/DEC-0002.md", "reason": "other"},
+                ],
+                self.secondary: [
+                    {"uri": self.primary, "reason": "produced_from, auth"},
+                ],
+            },
+        )
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, [{"uri": self.secondary, "reason": "produces, auth"}])
+        self.assertEqual(s_links, [{"uri": self.primary, "reason": "produced_from, auth"}])
+
+    def test_snapshot_relations_rejects_identical_or_invalid_uris(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats)
+        with self.assertRaises(ValueError):
+            snapshot_relations(client, self.primary, self.primary)
+        with self.assertRaises(ValueError):
+            snapshot_relations(client, "invalid-uri", self.secondary)
+
+    def test_set_reciprocal_relation_stat_failure_or_directory(self) -> None:
+        # 1. Primary does not exist
+        client = FakeOpenVikingClient(
+            stats={self.secondary: {"name": "DEC-0001.md", "isDir": False}}
+        )
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertIn("not found", res["error"].lower())
+
+        # 2. Secondary is a directory
+        client_dir = FakeOpenVikingClient(
+            stats={
+                self.primary: {"name": "auth-rfc.md", "isDir": False},
+                self.secondary: {"name": "decisions", "isDir": True},
+            }
+        )
+        res_dir = set_reciprocal_relation(
+            client_dir, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res_dir["ok"])
+        self.assertFalse(res_dir["changed"])
+        self.assertIn("directory", res_dir["error"].lower())
+
+    def test_set_reciprocal_relation_invalid_topology_or_desc(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats)
+        # Invalid topology (wrong direction)
+        res = set_reciprocal_relation(
+            client, self.secondary, self.primary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["changed"])
+
+        # Invalid desc with control chars
+        res_ctrl = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, "bad\ndesc"
+        )
+        self.assertFalse(res_ctrl["ok"])
+        self.assertFalse(res_ctrl["changed"])
+
+    def test_set_reciprocal_relation_noop_when_exact_exists(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [{"uri": self.secondary, "reason": self.primary_serialized}],
+                self.secondary: [{"uri": self.primary, "reason": self.secondary_serialized}],
+            },
+        )
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertEqual(len(client.unlink_calls), 0)
+        self.assertEqual(len(client.link_calls), 0)
+
+    def test_set_reciprocal_relation_fresh_creation(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats, relations={})
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["changed"])
+        # Verified state on client
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, [{"uri": self.secondary, "reason": self.primary_serialized}])
+        self.assertEqual(s_links, [{"uri": self.primary, "reason": self.secondary_serialized}])
+
+    def test_set_reciprocal_relation_drift_cleanup_and_convergence(self) -> None:
+        # Pre-call state has stale reasons and duplicates
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [
+                    {"uri": self.secondary, "reason": "produces, old"},
+                    {"uri": self.secondary, "reason": "produces, duplicate"},
+                ],
+                self.secondary: [
+                    {"uri": self.primary, "reason": "produced_from, stale"},
+                ],
+            },
+        )
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["changed"])
+
+        # Unlink was called for both endpoints
+        self.assertIn((self.primary, self.secondary), client.unlink_calls)
+        self.assertIn((self.secondary, self.primary), client.unlink_calls)
+
+        # Verified state on client has exact single entry in each direction
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, [{"uri": self.secondary, "reason": self.primary_serialized}])
+        self.assertEqual(s_links, [{"uri": self.primary, "reason": self.secondary_serialized}])
+
+    def test_set_reciprocal_relation_rollback_on_second_link_failure(self) -> None:
+        snapshot_primary = [{"uri": self.secondary, "reason": "produces, initial"}]
+        snapshot_secondary = [{"uri": self.primary, "reason": "produced_from, initial"}]
+
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: list(snapshot_primary),
+                self.secondary: list(snapshot_secondary),
+            },
+        )
+
+        real_link = client.link
+
+        def link_side_effect(from_uri: str, to_uris: str | list[str], reason: str = ""):
+            if from_uri == self.secondary and reason == self.secondary_serialized:
+                raise OpenVikingError("Simulated backend crash on secondary link")
+            return real_link(from_uri, to_uris, reason)
+
+        client.link = link_side_effect  # type: ignore[method-assign]
+
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertTrue(res["state_restored"])
+        self.assertIn("Simulated backend crash", res["error"])
+
+        # Client state was restored back to snapshot
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, snapshot_primary)
+        self.assertEqual(s_links, snapshot_secondary)
+
+    def test_set_reciprocal_relation_rollback_on_verification_failure(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats, relations={})
+
+        real_get = client.get_relations
+        read_count = 0
+
+        def flaky_get_relations(uri: str):
+            nonlocal read_count
+            read_count += 1
+            # Step 1 is snapshot (calls 1 and 2), Step 4 is verification (calls 3 and 4)
+            if read_count == 4 and uri == self.secondary:
+                # Return empty list simulating backend drop / corruption
+                return []
+            return real_get(uri)
+
+        client.get_relations = flaky_get_relations  # type: ignore[method-assign]
+
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertTrue(res["state_restored"])
+
+        # Persistent state matches pre-call snapshot (which was empty)
+        client.get_relations = real_get  # type: ignore[method-assign]
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, [])
+        self.assertEqual(s_links, [])
+
+    def test_set_reciprocal_relation_compensation_failure_reports_recovery(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [{"uri": self.secondary, "reason": "produces, old"}],
+            },
+        )
+
+        # Trigger failure on secondary link, and fail compensation relink
+        call_count = 0
+
+        def failing_link(from_uri: str, to_uris: str | list[str], reason: str = ""):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                # Second link fails
+                raise OpenVikingError("Secondary link failure")
+            if call_count > 2:
+                # Compensation link fails
+                raise OpenVikingError("Restore relink failed catastrophically")
+            targets = [to_uris] if isinstance(to_uris, str) else to_uris
+            for t in targets:
+                client.relations.setdefault(from_uri, []).append({"uri": t, "reason": reason})
+            return {"ok": True}
+
+        client.link = failing_link  # type: ignore[method-assign]
+
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["changed"])
+        self.assertFalse(res["state_restored"])
+        self.assertIn("recovery", res)
+        recovery = res["recovery"]
+        self.assertIn("current_state", recovery)
+        self.assertIn("pre_call_state", recovery)
+        self.assertIn("desired_state", recovery)
+        self.assertTrue(recovery["secondary_failed"])
+
+    def test_remove_reciprocal_relation_noop_when_absent(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats, relations={})
+        res = remove_reciprocal_relation(client, self.primary, self.secondary)
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertEqual(len(client.unlink_calls), 0)
+
+    def test_remove_reciprocal_relation_success(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [
+                    {"uri": self.secondary, "reason": self.primary_serialized},
+                    {"uri": self.secondary, "reason": "drift"},
+                ],
+                self.secondary: [
+                    {"uri": self.primary, "reason": self.secondary_serialized},
+                ],
+            },
+        )
+        res = remove_reciprocal_relation(client, self.primary, self.secondary)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["changed"])
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, [])
+        self.assertEqual(s_links, [])
+
+    def test_remove_reciprocal_relation_rollback_on_failure(self) -> None:
+        pre_primary = [{"uri": self.secondary, "reason": self.primary_serialized}]
+        pre_secondary = [{"uri": self.primary, "reason": self.secondary_serialized}]
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: list(pre_primary),
+                self.secondary: list(pre_secondary),
+            },
+        )
+
+        real_unlink = client.unlink
+
+        def failing_unlink(from_uri: str, to_uri: str):
+            if from_uri == self.secondary:
+                raise OpenVikingError("Unlink error on secondary")
+            return real_unlink(from_uri, to_uri)
+
+        client.unlink = failing_unlink  # type: ignore[method-assign]
+
+        res = remove_reciprocal_relation(client, self.primary, self.secondary)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["changed"])
+        self.assertTrue(res["state_restored"])
+        self.assertIn("Unlink error on secondary", res["error"])
+
+        # Client relations restored
+        p_links, s_links = snapshot_relations(client, self.primary, self.secondary)
+        self.assertEqual(p_links, pre_primary)
+        self.assertEqual(s_links, pre_secondary)
+
+    def test_remove_reciprocal_relation_compensation_failure(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [{"uri": self.secondary, "reason": self.primary_serialized}],
+                self.secondary: [{"uri": self.primary, "reason": self.secondary_serialized}],
+            },
+        )
+
+        real_unlink = client.unlink
+
+        def failing_unlink(from_uri: str, to_uri: str):
+            if from_uri == self.secondary:
+                raise OpenVikingError("Initial unlink failed on secondary")
+            return real_unlink(from_uri, to_uri)
+
+        def failing_link(from_uri: str, to_uris: str | list[str], reason: str = ""):
+            raise OpenVikingError("Compensation relink failed")
+
+        client.unlink = failing_unlink  # type: ignore[method-assign]
+        client.link = failing_link  # type: ignore[method-assign]
+
+        res = remove_reciprocal_relation(client, self.primary, self.secondary)
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["changed"])
+        self.assertFalse(res["state_restored"])
+        self.assertIn("recovery", res)
+
+    def test_remove_reciprocal_relation_invalid_uri_or_identical(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats)
+        res_ident = remove_reciprocal_relation(client, self.primary, self.primary)
+        self.assertFalse(res_ident["ok"])
+        self.assertFalse(res_ident["changed"])
+
+        res_inv = remove_reciprocal_relation(client, "not-a-viking-uri", self.secondary)
+        self.assertFalse(res_inv["ok"])
+        self.assertFalse(res_inv["changed"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
