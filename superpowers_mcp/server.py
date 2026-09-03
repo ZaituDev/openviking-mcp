@@ -1021,7 +1021,6 @@ def write_audit(
     category: str,
     title: str,
     content: str,
-    related_invariant_uris: list[str] | None = None,
 ) -> dict[str, Any]:
     """Write a point-in-time audit report.
 
@@ -1030,9 +1029,6 @@ def write_audit(
     Audits are single-snapshot reports, not accumulated insight — recurring
     conclusions across multiple audits belong in agent/patterns memory
     (extracted automatically via session.commit()), not hand-written here.
-
-    If related_invariant_uris is given, automatically links this audit to
-    those invariants (reason: audits).
     """
     if category not in VALID_AUDIT_CATEGORIES:
         return {
@@ -1051,14 +1047,7 @@ def write_audit(
         except OpenVikingError as exc:
             return {"error": str(exc)}
 
-        relation = None
-        if related_invariant_uris:
-            try:
-                relation = client.link(uri, related_invariant_uris, reason="audits")
-            except OpenVikingError as exc:
-                relation = {"error": str(exc)}
-
-    return {"uri": uri, "category": category, "linked_invariants": relation}
+    return {"uri": uri, "category": category}
 
 
 @mcp.tool()
