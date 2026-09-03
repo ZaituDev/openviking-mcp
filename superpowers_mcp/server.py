@@ -330,6 +330,8 @@ def log_context_used(
     decision, implementation, or review. This can be correct on the first
     prompt: unlike reasoning search, usage logging has no warm-up period.
     Do not call merely because a resource was searched, listed, or read.
+
+    runtime_session_id is reserved for the client integration; callers should omit it.
     """
     if not context_uris:
         return {"error": "context_uris cannot be empty."}

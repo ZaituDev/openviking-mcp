@@ -82,6 +82,8 @@ def search_project_context(
     viking://resources/project/decisions) — omit to search all of
     resources/. Always scoped: any target_uri outside
     viking://resources/ is rejected before any call is made.
+
+    runtime_session_id is reserved for the client integration; callers should omit it.
     """
     try:
         if target_uri:
