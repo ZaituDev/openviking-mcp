@@ -267,3 +267,392 @@ Update README and all affected tool docstrings so no documentation still promise
 - There is no legacy relation data to migrate.
 - Relation mutations operate under a single-writer assumption.
 - The external plugin update is intentionally excluded.
+
+---
+
+## Tasks
+
+### Task 1: Native OpenViking Transport Extension
+
+**Files:**
+- Modify: `shared/ov_client.py`
+- Test: `tests/test_ov_client.py`
+
+**Interfaces:**
+- Consumes: `OpenVikingClient`, `OpenVikingError`
+- Produces:
+  - `OpenVikingClient.stat_resource(uri: str) -> dict[str, Any]`: calls `GET /api/v1/fs/stat?uri=...`, returns `{name, size, mode, modTime, isDir, isLocked}` or raises `OpenVikingError`.
+  - `OpenVikingClient.unlink(from_uri: str, to_uri: str) -> dict[str, Any]`: calls `DELETE /api/v1/relations/link` with `{"from_uri": from_uri, "to_uri": to_uri}`.
+  - `OpenVikingClient.delete_resource(uri: str) -> dict[str, Any]`: calls `DELETE /api/v1/fs?uri=...`.
+  - `OpenVikingClient.exists(uri: str) -> bool`: updated to use `stat_resource` and return boolean, with optional `is_file: bool = False` or helper check.
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_ov_client.py` with mock tests asserting:
+- `stat_resource` calls `GET /api/v1/fs/stat` and returns stat dict.
+- `unlink` calls `DELETE /api/v1/relations/link` with json `{"from_uri": ..., "to_uri": ...}`.
+- `delete_resource` calls `DELETE /api/v1/fs` with `params={"uri": ...}`.
+- Error envelope handling raises `OpenVikingError`.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_ov_client.py -v`
+Expected: FAIL (AttributeError: 'OpenVikingClient' object has no attribute 'stat_resource' / 'unlink' / 'delete_resource')
+
+- [ ] **Step 3: Write minimal implementation**
+In `shared/ov_client.py`, add `stat_resource`, `unlink`, `delete_resource` methods and update `exists`.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_ov_client.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add shared/ov_client.py tests/test_ov_client.py
+git commit -m "feat(ov_client): add stat_resource, unlink, and delete_resource native transport wrappers"
+```
+
+### Task 2: Shared Relation Domain - Vocabulary, Topology, and Serialization/Parsing
+
+**Files:**
+- Create: `shared/relation_domain.py`
+- Test: `tests/test_relation_domain.py`
+
+**Interfaces:**
+- Consumes: N/A
+- Produces:
+  - `RECIPROCAL_PAIRS`: dict mapping canonical pairs:
+    - `produces` <-> `produced_from`
+    - `supersedes` <-> `superseded_by`
+    - `promoted_to` <-> `derived_from`
+    - `composes` <-> `part_of`
+    - `enforces` <-> `enforced_by`
+    - `references` <-> `referenced_by`
+  - `validate_endpoint_uri(uri: str) -> None`: validates uri starts with `viking://resources/project/`, ends with `.md`, has no wildcard (`*`, `?`), no traversal (`..`), no whitespace.
+  - `validate_topology(primary: str, secondary: str, reason_pair: str) -> tuple[str, str]`: returns `(primary_reason, secondary_reason)` after validating category rules:
+    - `produces/produced_from`: primary must be `viking://resources/project/research/...`, secondary must be `viking://resources/project/decisions/...`
+    - `supersedes/superseded_by`: both must be `viking://resources/project/decisions/...`
+    - `promoted_to/derived_from`: primary must be `viking://resources/project/decisions/...`, secondary must be in `architecture/`, `domains/`, or `invariants/`
+    - `composes/part_of`: primary must be `architecture/`, secondary must be `domains/`
+    - `enforces/enforced_by`: primary must be `invariants/`, secondary must be `domains/`
+    - `references/referenced_by`: any valid project markdown resource to any other valid project markdown resource
+    - Primary and secondary cannot be identical.
+  - `serialize_relation_reason(directional_reason: str, desc: str) -> str`: returns `<directional_reason>, <trimmed_desc>`. Raises `ValueError` if desc contains newlines/tabs/control chars or is empty after trim.
+  - `parse_relation_reason(raw_reason: str) -> dict[str, Any]`: splits once on first comma. Returns `{"reason": reason, "desc": desc}` if valid. If missing comma, empty reason, empty desc, unknown reason token, or control chars, returns `{"raw_reason": raw_reason, "parse_error": "<stable_code>"}`.
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_relation_domain.py` testing vocabulary pairs, URI validation, directional topology rules, description formatting/control-char rejection, serialization, split-once parsing preserving later commas, and all malformed-entry cases.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_relation_domain.py -v`
+Expected: FAIL (ModuleNotFoundError: No module named 'relation_domain')
+
+- [ ] **Step 3: Write minimal implementation**
+Implement `shared/relation_domain.py` with vocabulary, URI validation, topology validation, serialization, and parsing.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_relation_domain.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add shared/relation_domain.py tests/test_relation_domain.py
+git commit -m "feat(relation_domain): add vocabulary, topology validation, serialization, and split-once parsing"
+```
+
+### Task 3: Shared Relation Domain - Reciprocal Transactions and Exact-State Compensation
+
+**Files:**
+- Modify: `shared/relation_domain.py`
+- Modify: `tests/test_relation_domain.py`
+
+**Interfaces:**
+- Consumes: `OpenVikingClient`, `OpenVikingError`, Task 2 functions
+- Produces:
+  - `snapshot_relations(client: OpenVikingClient, primary: str, secondary: str) -> tuple[list[dict], list[dict]]`: gets relations on primary pointing to secondary, and secondary pointing to primary.
+  - `set_reciprocal_relation(client: OpenVikingClient, primary: str, secondary: str, reason_pair: str, desc: str) -> dict[str, Any]`:
+    - Checks endpoints exist via client.stat_resource.
+    - Validates topology and serializes reasons.
+    - Snapshots existing links between primary and secondary.
+    - If exact reciprocal pair already exists with matching reason and desc and no extra drift: returns `{"ok": True, "changed": False}`.
+    - Otherwise unlinks existing drift between them, links primary->secondary and secondary->primary, and verifies read-back.
+    - If linking or verification fails: compensates by restoring snapshot (unlinking any new links, relinking snapshot links). If compensation succeeds, returns `{"ok": False, "changed": False, "state_restored": True, "error": ...}`. If compensation fails, returns `{"ok": False, "changed": True, "state_restored": False, "error": ..., "recovery": ...}`.
+  - `remove_reciprocal_relation(client: OpenVikingClient, primary: str, secondary: str) -> dict[str, Any]`:
+    - Snapshots links between primary and secondary.
+    - If neither direction has any link between primary and secondary: returns `{"ok": True, "changed": False}`.
+    - Otherwise unlinks both directions.
+    - If unlinking fails: restores snapshot. Returns `ok`, `changed`, `state_restored`.
+
+- [ ] **Step 1: Write the failing test**
+In `tests/test_relation_domain.py`, add mock tests covering:
+- No-op set when exact pair exists (`changed=False`).
+- Normal set removing drift, linking both, verifying (`changed=True`).
+- Rollback/compensation on second link failure with snapshot restore (`changed=False, state_restored=True`).
+- Compensation failure handling when restore fails (`changed=True, state_restored=False`).
+- No-op remove when absent (`changed=False`).
+- Successful remove (`changed=True`).
+- Remove rollback on failure.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_relation_domain.py -v`
+Expected: FAIL (AttributeError: 'set_reciprocal_relation' not found)
+
+- [ ] **Step 3: Write minimal implementation**
+In `shared/relation_domain.py`, implement `snapshot_relations`, `set_reciprocal_relation`, and `remove_reciprocal_relation`.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_relation_domain.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add shared/relation_domain.py tests/test_relation_domain.py
+git commit -m "feat(relation_domain): add reciprocal relation transactions with verification and compensation"
+```
+
+### Task 4: Section-Level ATX Markdown Editor
+
+**Files:**
+- Create: `shared/l2_editor.py`
+- Test: `tests/test_l2_editor.py`
+
+**Interfaces:**
+- Consumes: N/A
+- Produces:
+  - `apply_section_edit(document: str, heading_selector: str, replacement_content: str) -> str`:
+    - Recognizes ATX headings (`#` through `######`) only outside fenced code blocks (triple backticks).
+    - Trims outer whitespace from `heading_selector`.
+    - Requires exactly one matching heading line in `document`; raises `ValueError` on 0 or multiple matches.
+    - Preserves the matched heading line.
+    - Replaces everything after it through, but not including, the next heading of equal or higher level.
+    - Verifies that replacement content contains only headings deeper than the matched heading.
+    - Normalizes: one newline after the heading, one blank line before the next same/higher heading or EOF.
+    - Empty replacement content is allowed.
+    - Content outside the selected section is preserved byte-for-byte.
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_l2_editor.py` testing:
+- Editing a middle section with same level following.
+- Editing the last section before EOF.
+- Preserving content outside section byte-for-byte.
+- Ignoring headings inside fenced code blocks.
+- Rejecting missing heading and ambiguous duplicate heading.
+- Rejecting replacement content containing equal or higher headings.
+- Allowing empty replacement content.
+- Normalization of newlines.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_l2_editor.py -v`
+Expected: FAIL (ModuleNotFoundError: No module named 'l2_editor')
+
+- [ ] **Step 3: Write minimal implementation**
+Implement `shared/l2_editor.py`.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_l2_editor.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add shared/l2_editor.py tests/test_l2_editor.py
+git commit -m "feat(l2_editor): add ATX markdown section editing with boundary and fence awareness"
+```
+
+### Task 5: Staged `promote_decision` Implementation
+
+**Files:**
+- Modify: `superpowers_mcp/server.py`
+- Test: `tests/test_superpowers_promote.py`
+
+**Interfaces:**
+- Consumes: `OpenVikingClient`, `OpenVikingError`, `relation_domain`, `l2_editor`
+- Produces:
+  - `promote_decision(dec_uri: str, action: str, target: str | None = None, target_path: str | None = None, write_mode: str | None = None, content: str | None = None, section: str | None = None, primary: str | None = None, secondary: str | None = None, reason_pair: str | None = None, desc: str | None = None) -> dict[str, Any]`
+  - Enforces action-specific required and forbidden fields.
+  - Validates `dec_uri` is a concrete `.md` file under `viking://resources/project/decisions/` with status `implemented`.
+  - Common envelope: `{"ok": bool, "action": action, "dec_uri": dec_uri, "changed": bool, ...}`
+  - `edit_l2`:
+    - `target` in `architecture | domains | invariants`
+    - `target_path` is relative markdown path
+    - `mode=create`: target must not exist, nonblank content
+    - `mode=replace`: target must exist, nonblank content, no-op if identical
+    - `mode=edit`: target must exist, `section` required, applies `apply_section_edit`, no-op if final document identical
+    - Verifies read-back, restores old content on edit/replace failure, deletes file on create failure.
+  - `set_relation`:
+    - Reason pair restricted to: `promoted_to/derived_from`, `composes/part_of`, `enforces/enforced_by`, `references/referenced_by`.
+    - If `reason_pair == "promoted_to/derived_from"`, `primary == dec_uri`.
+    - Delegates to `set_reciprocal_relation`.
+  - `remove_relation`:
+    - If relation involves a decision, `primary == dec_uri`.
+    - Delegates to `remove_reciprocal_relation`.
+  - `finalize`:
+    - Validates `dec_uri` is still `implemented`, updates status to `promoted`, writes back, verifies.
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_superpowers_promote.py` testing:
+- Required and forbidden field matrix for all 4 actions.
+- Decision URI validation, non-existent decision, status not implemented.
+- `edit_l2` create, replace, edit, no-op identical write, compensation.
+- `set_relation` vocabulary restriction, primary == dec_uri requirement, reciprocal creation.
+- `remove_relation` decision primary constraint, reciprocal removal.
+- `finalize` updating status to `promoted`, and rejecting subsequent promotion calls.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_superpowers_promote.py -v`
+Expected: FAIL (Signature mismatch or behavior mismatch)
+
+- [ ] **Step 3: Write minimal implementation**
+Update `promote_decision` in `superpowers_mcp/server.py` to match the staged promotion specification.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_superpowers_promote.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add superpowers_mcp/server.py tests/test_superpowers_promote.py
+git commit -m "feat(superpowers_mcp): implement staged status-gated promote_decision"
+```
+
+### Task 6: First-Party Writers Update (`write_decision`, `supersede_decision`, `write_audit`)
+
+**Files:**
+- Modify: `braining_mcp/server.py`
+- Modify: `superpowers_mcp/server.py`
+- Test: `tests/test_writers.py`
+
+**Interfaces:**
+- Consumes: `relation_domain`, `OpenVikingClient`
+- Produces:
+  - `write_decision(..., source_research: list[dict[str, str]] | None = None)`:
+    - Replaces `source_research_uris`.
+    - Each entry is `{"uri": "...", "desc": "..."}`.
+    - Validates research URI and description.
+    - Creates `produces / produced_from` pairs sequentially.
+    - Stops on first failure; preserves new decision and earlier verified pairs; compensates failing pair.
+  - `supersede_decision(..., relation_desc: str)`:
+    - Adds required `relation_desc`.
+    - Creates `supersedes / superseded_by` between new decision and old decision.
+    - If relation fails: preserves new decision and old decision superseded status, compensates relation, returns hard failure envelope.
+  - `write_audit(...)`:
+    - Remove `related_invariant_uris` parameter and relation linking logic completely.
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_writers.py` testing:
+- `write_decision` with `source_research`, sequential stop-on-failure, reciprocal `produces/produced_from` creation.
+- `supersede_decision` requiring `relation_desc`, reciprocal `supersedes/superseded_by` creation.
+- `write_audit` signature having no `related_invariant_uris` and returning no relation output.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_writers.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: Write minimal implementation**
+Update `write_decision` and `supersede_decision` in `braining_mcp/server.py`. Update `write_audit` in `superpowers_mcp/server.py`.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_writers.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add braining_mcp/server.py superpowers_mcp/server.py tests/test_writers.py
+git commit -m "feat: update first-party writers to use verified reciprocal relations and remove audit links"
+```
+
+### Task 7: Retrieval Update (`list_relations`)
+
+**Files:**
+- Modify: `retrieval_mcp/server.py`
+- Test: `tests/test_retrieval_relations.py`
+
+**Interfaces:**
+- Consumes: `relation_domain.parse_relation_reason`
+- Produces:
+  - `list_relations(uri: str) -> dict[str, Any]`:
+    - Returns `{"uri": uri, "relations": [...]}`
+    - Valid items: `{"uri": target_uri, "reason": reason_token, "desc": desc}`
+    - Malformed items: `{"uri": target_uri, "raw_reason": raw, "parse_error": error_code}`
+
+- [ ] **Step 1: Write the failing test**
+Create `tests/test_retrieval_relations.py` testing:
+- Flat list return with `uri`, `reason`, `desc` (preserving commas in desc).
+- Malformed native reason entries returning `uri`, `raw_reason`, `parse_error`.
+- Ungrouped flat schema.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_retrieval_relations.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: Write minimal implementation**
+Update `list_relations` in `retrieval_mcp/server.py` to use `parse_relation_reason` and return flat list with valid and malformed entries.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_retrieval_relations.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add retrieval_mcp/server.py tests/test_retrieval_relations.py
+git commit -m "feat(retrieval_mcp): update list_relations to return flat parsed relations and explicit malformed entries"
+```
+
+### Task 8: Opt-in Live Integration Contract Suite
+
+**Files:**
+- Create: `tests/test_live_contract.py`
+
+**Interfaces:**
+- Consumes: Live OpenViking Server (`OPENVIKING_LIVE_TESTS=1`)
+- Produces:
+  - Integration tests verifying:
+    - stat / create / read / delete round trips on disposable markdown files.
+    - link and reciprocal relation creation.
+    - list_relations retrieving parsed relations.
+    - unlink removing relations.
+    - complete cleanup of all disposable test files.
+
+- [ ] **Step 1: Write the live contract test**
+Create `tests/test_live_contract.py` with `unittest.skipUnless(os.environ.get("OPENVIKING_LIVE_TESTS") == "1", "Live tests disabled")`.
+
+- [ ] **Step 2: Run test to verify it passes against live server**
+Run: `OPENVIKING_LIVE_TESTS=1 python3 -m unittest tests/test_live_contract.py -v`
+Expected: PASS
+
+- [ ] **Step 3: Commit**
+```bash
+git add tests/test_live_contract.py
+git commit -m "test: add opt-in live OpenViking contract integration test suite"
+```
+
+### Task 9: Documentation Updates and Design Spec Rewrite
+
+**Files:**
+- Modify/Rewrite: `superpowers_mcp/relation-tool-design.md`
+- Modify: `README.md`
+- Test: `tests/test_docs_and_signatures.py`
+
+**Interfaces:**
+- Consumes: All updated tools and schemas
+- Produces:
+  - Authoritative `superpowers_mcp/relation-tool-design.md` describing staged promotion actions, reciprocal vocabulary, storage format, and error handling.
+  - Updated `README.md` reflecting new tool arguments and removal of atomic 5-step promotion and audit linking.
+  - Docstring audit verifying no stale references to atomic promotion, `.overview.md`, etc.
+
+- [ ] **Step 1: Write verification test for docs and docstrings**
+Create `tests/test_docs_and_signatures.py` checking docstrings of `promote_decision`, `write_decision`, `supersede_decision`, `write_audit`, and `list_relations` for stale terms.
+
+- [ ] **Step 2: Run test to verify it fails**
+Run: `python3 -m unittest tests/test_docs_and_signatures.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: Update docs and docstrings**
+Rewrite `superpowers_mcp/relation-tool-design.md`, update `README.md`, and polish docstrings.
+
+- [ ] **Step 4: Run test to verify it passes**
+Run: `python3 -m unittest tests/test_docs_and_signatures.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+```bash
+git add superpowers_mcp/relation-tool-design.md README.md superpowers_mcp/server.py braining_mcp/server.py retrieval_mcp/server.py tests/test_docs_and_signatures.py
+git commit -m "docs: rewrite relation-tool-design.md and update README and docstrings for staged promotion"
+```
