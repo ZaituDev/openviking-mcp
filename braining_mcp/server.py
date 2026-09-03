@@ -5,7 +5,7 @@ Per OPENVIKING_WORKFLOW_ARCHITECTURE.md: braining decides WHAT. Its write
 ceiling is decisions/ — it never touches architecture/, domains/, or
 invariants/ directly. Those tools simply do not exist in this server.
 
-Relations (e.g. "this decision concluded from this research", "this
+Relations (e.g. "this decision produced from this research", "this
 decision supersedes that one") are recorded via reciprocal relation
 pairs (produces/produced_from, supersedes/superseded_by) with verified
 topology and compensation.
@@ -258,7 +258,12 @@ def supersede_decision(
 
     This is the ONLY way an existing decision's status can change to
     superseded. Decisions are immutable once accepted — there is no tool
-    to edit a decision's content directly. Effects, all performed here:
+    to edit a decision's content directly.
+
+    relation_desc: description for the reciprocal supersession relation
+    (supersedes/superseded_by) between the new and old decisions.
+
+    Effects, all performed here:
 
         1. Create the new decision (status: not-implemented).
         2. Set superseded_by on the old decision.

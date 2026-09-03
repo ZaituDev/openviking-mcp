@@ -231,6 +231,8 @@ def promote_decision(
 
     action: one of "edit_l2", "set_relation", "remove_relation", "finalize".
 
+    The target decision must have status: implemented. Other statuses are rejected.
+
     Actions:
         edit_l2:
             Update or create a living-truth L2 document under architecture/,
@@ -246,6 +248,9 @@ def promote_decision(
         finalize:
             Mark the decision as promoted once all staged edits and relations
             are verified. Requires no action-specific parameters.
+
+    Returns a standardized envelope with keys: ok, action, dec_uri, changed,
+    and either result or error (with optional state_restored and recovery).
     """
     if action not in VALID_PROMOTION_ACTIONS:
         return {
