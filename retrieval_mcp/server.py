@@ -46,6 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 from fastmcp import FastMCP  # noqa: E402
 
 from ov_client import OpenVikingClient, OpenVikingError  # noqa: E402
+try:
+    from relation_domain import parse_relation_reason  # noqa: E402
+except ImportError:  # pragma: no cover
+    from shared.relation_domain import parse_relation_reason  # noqa: E402
 from runtime_session import RuntimeSessionError, resolve_runtime_session_id  # noqa: E402
 from uri_guard import UriScopeError, guard_resource_uri, guard_resource_uris  # noqa: E402
 
@@ -206,11 +210,10 @@ def read_project_resource(uri: str, detail: Literal["L0", "L1", "L2"] = "L1") ->
 def list_relations(uri: str) -> dict[str, Any]:
     """Graph traversal — what does this resource relate to, and how.
 
-    Groups the raw {"uri", "reason"} entries by `reason` for readability.
-    The three reasons in active use across the project are
-    concluded_from, promoted_to, and superseded_by  — any other
-    reason value found is passed through under its own key rather than
-    dropped, since the grouping is presentational, not a filter.
+    Returns a flat list of parsed relations and explicit malformed entries.
+    Valid entries have `uri`, `reason`, and `desc` (preserving commas in `desc`).
+    Malformed or legacy entries without valid reason syntax have `uri`, `raw_reason`,
+    and `parse_error`.
 
     Always guarded to viking://resources/*.
 
@@ -218,9 +221,24 @@ def list_relations(uri: str) -> dict[str, Any]:
         list_relations("viking://resources/project/decisions/DEC-0024.md")
         ->
         {
-          "concluded_from": ["viking://resources/project/research/debates/advisors.md"],
-          "promoted_to": ["viking://resources/project/domains/governance/advisors.md"],
-          "superseded_by": ["viking://resources/project/decisions/DEC-0031.md"]
+          "uri": "viking://resources/project/decisions/DEC-0024.md",
+          "relations": [
+            {
+              "uri": "viking://resources/project/research/debates/advisors.md",
+              "reason": "produced_from",
+              "desc": "initial consensus exploration",
+            },
+            {
+              "uri": "viking://resources/project/domains/governance/advisors.md",
+              "reason": "promoted_to",
+              "desc": "authoritative domain rule",
+            },
+            {
+              "uri": "viking://resources/project/decisions/DEC-0031.md",
+              "reason": "superseded_by",
+              "desc": "replaced by unified governance framework",
+            },
+          ],
         }
     """
     try:
@@ -234,16 +252,30 @@ def list_relations(uri: str) -> dict[str, Any]:
         except OpenVikingError as exc:
             return {"error": str(exc)}
 
-    grouped: dict[str, list[str]] = {}
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        reason = entry.get("reason", "related")
-        target = entry.get("uri", "")
-        if target:
-            grouped.setdefault(reason, []).append(target)
+    relations_list: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and "uri" in entry and "reason" in entry:
+                raw_reason = str(entry.get("reason", ""))
+                parsed = parse_relation_reason(raw_reason)
+                if "reason" in parsed and "desc" in parsed:
+                    relations_list.append(
+                        {
+                            "uri": entry["uri"],
+                            "reason": parsed["reason"],
+                            "desc": parsed["desc"],
+                        }
+                    )
+                elif "parse_error" in parsed:
+                    relations_list.append(
+                        {
+                            "uri": entry["uri"],
+                            "raw_reason": parsed.get("raw_reason", entry.get("reason", "")),
+                            "parse_error": parsed["parse_error"],
+                        }
+                    )
 
-    return {"uri": uri, "relations": grouped}
+    return {"uri": uri, "relations": relations_list}
 
 
 if __name__ == "__main__":
