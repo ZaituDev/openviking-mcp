@@ -144,7 +144,7 @@ def apply_section_edit(
     prefix = document[:matched_start]
     preserved_heading = document[matched_start:matched_end].rstrip("\r\n")
     suffix = document[next_heading_start:]
-    body = replacement_content.strip()
+    body = replacement_content.strip("\r\n")
 
     if suffix:
         if body:

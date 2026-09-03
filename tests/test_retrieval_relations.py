@@ -367,6 +367,8 @@ class TestRetrievalRelations(unittest.TestCase):
             123,
             {"missing_uri": "foo", "reason": "supersedes, desc"},
             {"uri": "viking://resources/project/a.md"},  # missing reason
+            {"uri": "", "reason": "supersedes, empty uri"},
+            {"uri": None, "reason": "supersedes, none uri"},
             {
                 "uri": "viking://resources/project/valid.md",
                 "reason": "supersedes, valid item",

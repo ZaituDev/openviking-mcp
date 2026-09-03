@@ -296,9 +296,9 @@ class L2EditorTests(unittest.TestCase):
         )
         self.assertEqual(result, expected)
 
-        # Whitespace-only replacement content
-        result_ws = apply_section_edit(doc, "## Target Section", "   \n\n   ")
-        self.assertEqual(result_ws, expected)
+        # All-newline replacement content
+        result_nl = apply_section_edit(doc, "## Target Section", "\n\n\r\n")
+        self.assertEqual(result_nl, expected)
 
     def test_allow_empty_replacement_content_at_eof(self) -> None:
         doc = (
@@ -310,8 +310,53 @@ class L2EditorTests(unittest.TestCase):
         expected = "# Doc\n\n## Target Section\n"
         self.assertEqual(result, expected)
 
-        result_ws = apply_section_edit(doc, "## Target Section", "\n\n   \t\n")
-        self.assertEqual(result_ws, expected)
+        # All-newline replacement content
+        result_nl = apply_section_edit(doc, "## Target Section", "\n\n\r\n\n")
+        self.assertEqual(result_nl, expected)
+
+    def test_preserve_horizontal_indentation_on_replacement_boundaries(self) -> None:
+        doc = (
+            "# Doc\n\n"
+            "## Code Section\n"
+            "Old content.\n\n"
+            "## Next Section\n"
+            "Next content.\n"
+        )
+        # 4-space indented code block with leading/trailing newlines
+        code_replacement = (
+            "\n\n"
+            "    def example():\n"
+            "        return 42\n"
+            "\n"
+        )
+        result_code = apply_section_edit(doc, "## Code Section", code_replacement)
+        expected_code = (
+            "# Doc\n\n"
+            "## Code Section\n"
+            "    def example():\n"
+            "        return 42\n\n"
+            "## Next Section\n"
+            "Next content.\n"
+        )
+        self.assertEqual(result_code, expected_code)
+
+        # 4-space indented nested list item with leading/trailing newlines
+        list_replacement = (
+            "\r\n"
+            "    - nested item 1\n"
+            "    - nested item 2\n"
+            "\r\n"
+        )
+        result_list = apply_section_edit(doc, "## Code Section", list_replacement)
+        expected_list = (
+            "# Doc\n\n"
+            "## Code Section\n"
+            "    - nested item 1\n"
+            "    - nested item 2\n\n"
+            "## Next Section\n"
+            "Next content.\n"
+        )
+        self.assertEqual(result_list, expected_list)
 
     def test_normalization_of_newlines(self) -> None:
         # Replacement content with redundant leading/trailing whitespace

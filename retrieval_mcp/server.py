@@ -255,7 +255,7 @@ def list_relations(uri: str) -> dict[str, Any]:
     relations_list: list[dict[str, Any]] = []
     if isinstance(raw, list):
         for entry in raw:
-            if isinstance(entry, dict) and "uri" in entry and "reason" in entry:
+            if isinstance(entry, dict) and bool(entry.get("uri")) and "reason" in entry:
                 raw_reason = str(entry.get("reason", ""))
                 parsed = parse_relation_reason(raw_reason)
                 if "reason" in parsed and "desc" in parsed:

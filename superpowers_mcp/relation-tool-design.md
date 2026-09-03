@@ -113,7 +113,7 @@ When `retrieval_mcp.list_relations` encounters relation entries:
 
 ## 4. Reciprocal Transactions & Fault Tolerance
 
-Relation mutations must maintain reciprocal consistency across both endpoints. OpenViking native endpoints operate on single-link calls (`link` and `unlink`), so reciprocal transactions provide application-level consistency with snapshotting, verification, and exact-state compensation.
+Relation mutations must maintain reciprocal consistency across both endpoints. OpenViking native endpoints operate on single-link calls (`link` and `unlink`), so reciprocal transactions provide application-level consistency with snapshotting, verification, and exact-state compensation. All reciprocal relation mutations operate under a single-writer assumption.
 
 ### Transaction Lifecycle for `set_reciprocal_relation`
 
