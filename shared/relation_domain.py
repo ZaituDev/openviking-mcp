@@ -240,11 +240,11 @@ def parse_relation_reason(raw_reason: str) -> dict[str, Any]:
 
 
 def _relation_key(item: dict[str, Any]) -> tuple[str, str]:
-    return (str(item.get("uri", "")), str(item.get("reason", "")))
+    return (str(item.get("uri") or ""), str(item.get("reason") or ""))
 
 
 def _compare_relation_lists(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> bool:
-    return sorted(a, key=_relation_key) == sorted(b, key=_relation_key)
+    return sorted(_relation_key(item) for item in a) == sorted(_relation_key(item) for item in b)
 
 
 def snapshot_relations(
@@ -367,17 +367,14 @@ def set_reciprocal_relation(
 
     # Compensation on failure: restore exact pre-call snapshot
     try:
-        try:
-            curr_p, curr_s = snapshot_relations(client, primary, secondary)
-        except Exception:
-            curr_p, curr_s = [], []
+        curr_p, curr_s = snapshot_relations(client, primary, secondary)
 
         # Restore primary
         if not _compare_relation_lists(curr_p, pre_primary_links):
             if curr_p:
                 client.unlink(primary, secondary)
             for entry in pre_primary_links:
-                reason = entry.get("reason", "")
+                reason = entry.get("reason") or ""
                 client.link(primary, secondary, reason)
 
         # Restore secondary
@@ -385,7 +382,7 @@ def set_reciprocal_relation(
             if curr_s:
                 client.unlink(secondary, primary)
             for entry in pre_secondary_links:
-                reason = entry.get("reason", "")
+                reason = entry.get("reason") or ""
                 client.link(secondary, primary, reason)
 
         restored_p, restored_s = snapshot_relations(client, primary, secondary)
@@ -483,17 +480,14 @@ def remove_reciprocal_relation(
 
     # Compensation on failure: restore snapshot
     try:
-        try:
-            curr_p, curr_s = snapshot_relations(client, primary, secondary)
-        except Exception:
-            curr_p, curr_s = [], []
+        curr_p, curr_s = snapshot_relations(client, primary, secondary)
 
         # Restore primary
         if not _compare_relation_lists(curr_p, pre_primary_links):
             if curr_p:
                 client.unlink(primary, secondary)
             for entry in pre_primary_links:
-                reason = entry.get("reason", "")
+                reason = entry.get("reason") or ""
                 client.link(primary, secondary, reason)
 
         # Restore secondary
@@ -501,7 +495,7 @@ def remove_reciprocal_relation(
             if curr_s:
                 client.unlink(secondary, primary)
             for entry in pre_secondary_links:
-                reason = entry.get("reason", "")
+                reason = entry.get("reason") or ""
                 client.link(secondary, primary, reason)
 
         restored_p, restored_s = snapshot_relations(client, primary, secondary)

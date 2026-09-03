@@ -28,6 +28,7 @@ from relation_domain import (  # noqa: E402
     PARSE_ERROR_INVALID_CONTROL_CHARS,
     PARSE_ERROR_MISSING_DELIMITER,
     PARSE_ERROR_UNKNOWN_REASON,
+    _compare_relation_lists,
     parse_relation_reason,
     remove_reciprocal_relation,
     serialize_relation_reason,
@@ -854,6 +855,79 @@ class ReciprocalRelationsTransactionTests(unittest.TestCase):
         res_inv = remove_reciprocal_relation(client, "not-a-viking-uri", self.secondary)
         self.assertFalse(res_inv["ok"])
         self.assertFalse(res_inv["changed"])
+
+    def test_compare_relation_lists_normalization(self) -> None:
+        # None and empty string in reason should match after normalization
+        list_a = [{"uri": "viking://resources/project/decisions/d1.md", "reason": None}]
+        list_b = [{"uri": "viking://resources/project/decisions/d1.md", "reason": ""}]
+        self.assertTrue(_compare_relation_lists(list_a, list_b))
+
+    def test_set_reciprocal_relation_compensation_snapshot_failure(self) -> None:
+        client = FakeOpenVikingClient(stats=self.stats, relations={})
+
+        real_get = client.get_relations
+        read_count = 0
+
+        def flaky_get(uri: str):
+            nonlocal read_count
+            read_count += 1
+            # First two calls are for pre-call snapshot (primary and secondary)
+            if read_count > 2:
+                raise OpenVikingError("Backend down during compensation snapshot")
+            return real_get(uri)
+
+        def failing_link(from_uri: str, to_uris: str | list[str], reason: str = ""):
+            if from_uri == self.secondary:
+                raise OpenVikingError("Secondary link failed")
+            return {"ok": True}
+
+        client.get_relations = flaky_get  # type: ignore[method-assign]
+        client.link = failing_link  # type: ignore[method-assign]
+
+        res = set_reciprocal_relation(
+            client, self.primary, self.secondary, self.reason_pair, self.desc
+        )
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["changed"])
+        self.assertFalse(res["state_restored"])
+        self.assertIn("recovery", res)
+        self.assertIn("compensation failed", res["error"].lower())
+
+    def test_remove_reciprocal_relation_compensation_snapshot_failure(self) -> None:
+        client = FakeOpenVikingClient(
+            stats=self.stats,
+            relations={
+                self.primary: [{"uri": self.secondary, "reason": self.primary_serialized}],
+                self.secondary: [{"uri": self.primary, "reason": self.secondary_serialized}],
+            },
+        )
+
+        real_unlink = client.unlink
+        real_get = client.get_relations
+        read_count = 0
+
+        def failing_unlink(from_uri: str, to_uri: str):
+            if from_uri == self.secondary:
+                raise OpenVikingError("Unlink failed on secondary")
+            return real_unlink(from_uri, to_uri)
+
+        def flaky_get(uri: str):
+            nonlocal read_count
+            read_count += 1
+            # First two calls are for pre-call snapshot
+            if read_count > 2:
+                raise OpenVikingError("Get relations failed during compensation")
+            return real_get(uri)
+
+        client.unlink = failing_unlink  # type: ignore[method-assign]
+        client.get_relations = flaky_get  # type: ignore[method-assign]
+
+        res = remove_reciprocal_relation(client, self.primary, self.secondary)
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["changed"])
+        self.assertFalse(res["state_restored"])
+        self.assertIn("recovery", res)
+        self.assertIn("compensation failed", res["error"].lower())
 
 
 if __name__ == "__main__":
