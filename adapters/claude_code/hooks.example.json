@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__retrieval-mcp__search_project_context|mcp__superpowers-mcp__log_context_used",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python /home/hmmm/projects/openviking-mcp/adapters/claude_code/inject_runtime_session.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
