@@ -5,12 +5,10 @@ Per OPENVIKING_WORKFLOW_ARCHITECTURE.md: braining decides WHAT. Its write
 ceiling is decisions/ — it never touches architecture/, domains/, or
 invariants/ directly. Those tools simply do not exist in this server.
 
-Relations (e.g. "this decision concluded from this research", "this
-decision supersedes that one") are recorded via client.link(), OpenViking's
-native relation endpoint — confirmed fixed and verified via live smoke
-test (see shared/ov_client.py). The reason string is always one of a
-small closed vocabulary (concluded_from, supersedes, superseded_by) so
-retrieval-mcp's list_relations() can group results meaningfully.
+Relations (e.g. "this decision produced from this research", "this
+decision supersedes that one") are recorded via reciprocal relation
+pairs (produces/produced_from, supersedes/superseded_by) with verified
+topology and compensation.
 
 Tools:
     search_decisions      — search decisions/ and invariants/ for duplicates
@@ -36,11 +34,27 @@ from decision_frontmatter import (  # noqa: E402
     next_decision_number,
     with_status,
 )
+from relation_domain import (  # noqa: E402
+    set_reciprocal_relation,
+    validate_endpoint_uri,
+)
 
 PROJECT_ROOT = "viking://resources/project"
 DECISIONS_URI = f"{PROJECT_ROOT}/decisions"
 INVARIANTS_URI = f"{PROJECT_ROOT}/invariants"
 RESEARCH_URI = f"{PROJECT_ROOT}/research"
+
+
+def _validate_decision_uri(dec_uri: str) -> str | None:
+    if not isinstance(dec_uri, str):
+        return f"old_dec_uri must be a string, got {type(dec_uri).__name__}"
+    if not dec_uri.startswith(f"{DECISIONS_URI}/"):
+        return f"old_dec_uri '{dec_uri}' must start with '{DECISIONS_URI}/'"
+    try:
+        validate_endpoint_uri(dec_uri)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 VALID_RESEARCH_CATEGORIES = ("ideas", "debates", "experiments")
 
@@ -120,7 +134,7 @@ def write_decision(
     alternatives: str,
     decision: str,
     consequences: str,
-    source_research_uris: list[str] | None = None,
+    source_research: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Create a new decision. Always born with status: not-implemented —
     this tool cannot create a decision in any other status; implementation
@@ -131,9 +145,9 @@ def write_decision(
     silently written as blank, since a decision missing its own reasoning
     defeats the point of recording it at all.
 
-    If source_research_uris is given, this decision is automatically
-    linked back to the research it concluded from — you do not need a
-    separate linking step.
+    If source_research is given, reciprocal produces/produced_from relations
+    are established sequentially between each research document and the new
+    decision.
     """
     for field_name, value in [
         ("context", context),
@@ -144,6 +158,9 @@ def write_decision(
     ]:
         if not value or not value.strip():
             return {"error": f"'{field_name}' is required and cannot be empty."}
+
+    if source_research is not None and not isinstance(source_research, list):
+        return {"error": "'source_research' must be a list of dicts with 'uri' and 'desc'."}
 
     with OpenVikingClient() as client:
         try:
@@ -173,22 +190,57 @@ def write_decision(
         except OpenVikingError as exc:
             return {"error": str(exc)}
 
-        relation = None
-        if source_research_uris:
-            try:
-                relation = client.link(uri, source_research_uris, reason="concluded_from")
-            except OpenVikingError as exc:
-                # The decision itself is already written and durable at
-                # this point — don't fail the whole tool call over a
-                # relation-link failure. Surface it so the caller knows
-                # the link didn't take, but the decision stands.
-                relation = {"error": str(exc)}
+        linked_research: list[dict[str, str]] = []
+        if source_research:
+            for item in source_research:
+                if (
+                    not isinstance(item, dict)
+                    or "uri" not in item
+                    or "desc" not in item
+                    or not isinstance(item.get("uri"), str)
+                    or not isinstance(item.get("desc"), str)
+                ):
+                    return {
+                        "error": (
+                            f"Invalid source_research entry {item}: must be a dict with 'uri' and 'desc' strings. "
+                            f"Decision created at {uri} with status 'not-implemented' was preserved."
+                        ),
+                        "uri": uri,
+                        "dec_number": dec_number,
+                        "status": "not-implemented",
+                        "linked_research": linked_research,
+                    }
+
+                item_uri = item["uri"]
+                item_desc = item["desc"].strip()
+
+                rel_res = set_reciprocal_relation(
+                    client,
+                    item_uri,
+                    uri,
+                    "produces/produced_from",
+                    item_desc,
+                )
+
+                if not rel_res.get("ok"):
+                    return {
+                        "error": (
+                            f"Failed to link research relation for '{item_uri}': {rel_res.get('error')}. "
+                            f"Decision created at {uri} with status 'not-implemented' was preserved."
+                        ),
+                        "uri": uri,
+                        "dec_number": dec_number,
+                        "status": "not-implemented",
+                        "linked_research": linked_research,
+                    }
+
+                linked_research.append({"uri": item_uri, "desc": item_desc})
 
     return {
         "uri": uri,
         "dec_number": dec_number,
         "status": "not-implemented",
-        "linked_research": relation,
+        "linked_research": linked_research,
     }
 
 
@@ -200,18 +252,24 @@ def supersede_decision(
     alternatives: str,
     decision: str,
     consequences: str,
+    relation_desc: str,
 ) -> dict[str, Any]:
     """Retire an old decision and create its replacement, atomically.
 
     This is the ONLY way an existing decision's status can change to
     superseded. Decisions are immutable once accepted — there is no tool
-    to edit a decision's content directly. Effects, all performed here:
+    to edit a decision's content directly.
+
+    relation_desc: description for the reciprocal supersession relation
+    (supersedes/superseded_by) between the new and old decisions.
+
+    Effects, all performed here:
 
         1. Create the new decision (status: not-implemented).
         2. Set superseded_by on the old decision.
         3. Set the old decision's status to: superseded.
-        4. Record the supersession relation via client.link() (reason:
-           supersedes), from the new decision back to the old one.
+        4. Record the supersession relation via reciprocal supersedes/superseded_by
+           relations between the new decision and old decision.
 
     old_dec_uri's current status does not matter — a decision can be
     superseded whether it was not-implemented, implemented, or promoted.
@@ -219,6 +277,29 @@ def supersede_decision(
     from it may now be stale; that is superpowers' audit to catch, not
     something this tool fixes automatically.
     """
+    for field_name, value in [
+        ("context", context),
+        ("problem", problem),
+        ("alternatives", alternatives),
+        ("decision", decision),
+        ("consequences", consequences),
+    ]:
+        if not value or not value.strip():
+            return {"error": f"'{field_name}' is required and cannot be empty."}
+
+    dec_err = _validate_decision_uri(old_dec_uri)
+    if dec_err:
+        return {"error": f"Invalid old_dec_uri: {dec_err}"}
+
+    if not isinstance(relation_desc, str):
+        return {"error": f"'relation_desc' must be a string, got {type(relation_desc).__name__}."}
+
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in relation_desc):
+        return {"error": "'relation_desc' must not contain newlines, tabs, or control characters."}
+
+    if not relation_desc.strip():
+        return {"error": "'relation_desc' is required and cannot be empty."}
+
     with OpenVikingClient() as client:
         try:
             old_content = client.read(old_dec_uri)
@@ -260,19 +341,31 @@ def supersede_decision(
                 "new_uri": new_uri,
             }
 
-        try:
-            relation = client.link(new_uri, [old_dec_uri], reason="supersedes")
-        except OpenVikingError as exc:
-            # Both decision writes already succeeded and are durable —
-            # a link failure here shouldn't be reported as if the whole
-            # supersession failed.
-            relation = {"error": str(exc)}
+        rel_res = set_reciprocal_relation(
+            client,
+            new_uri,
+            old_dec_uri,
+            "supersedes/superseded_by",
+            relation_desc,
+        )
+
+        if not rel_res.get("ok"):
+            return {
+                "error": (
+                    f"Decisions updated (new: {new_uri}, old: {old_dec_uri} superseded), "
+                    f"but reciprocal relation linking failed: {rel_res.get('error')}"
+                ),
+                "new_uri": new_uri,
+                "old_uri": old_dec_uri,
+                "old_status": "superseded",
+                "relation": rel_res,
+            }
 
     return {
         "new_uri": new_uri,
         "old_uri": old_dec_uri,
         "old_status": "superseded",
-        "relation": relation,
+        "relation": rel_res,
     }
 
 

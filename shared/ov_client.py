@@ -164,10 +164,27 @@ class OpenVikingClient:
         result = data.get("result", {})
         return result.get("entries", result) if isinstance(result, dict) else result
 
-    def exists(self, uri: str) -> bool:
-        """GET /api/v1/fs/stat — 4xx/error means the path doesn't exist."""
+    def stat_resource(self, uri: str) -> dict[str, Any]:
+        """GET /api/v1/fs/stat — stat a resource, returning metadata dict."""
+        data = self._request("GET", "/api/v1/fs/stat", params={"uri": uri})
+        result = data.get("result", data)
+        return result if isinstance(result, dict) else {}
+
+    def delete_resource(self, uri: str) -> dict[str, Any]:
+        """DELETE /api/v1/fs — delete a resource."""
+        data = self._request("DELETE", "/api/v1/fs", params={"uri": uri})
+        result = data.get("result", data)
+        return result if isinstance(result, dict) else {}
+
+    def exists(self, uri: str, is_file: bool = False) -> bool:
+        """GET /api/v1/fs/stat via stat_resource — error means the path doesn't exist.
+
+        When is_file is True, returns False if the resource is a directory.
+        """
         try:
-            self._request("GET", "/api/v1/fs/stat", params={"uri": uri})
+            stat = self.stat_resource(uri)
+            if is_file and (stat.get("isDir") is True or stat.get("is_dir") is True):
+                return False
             return True
         except OpenVikingError:
             return False
@@ -256,6 +273,16 @@ class OpenVikingClient:
             json={"from_uri": from_uri, "to_uris": to_uris, "reason": reason},
         )
         return data.get("result", {})
+
+    def unlink(self, from_uri: str, to_uri: str) -> dict[str, Any]:
+        """DELETE /api/v1/relations/link — remove a directional relation link."""
+        data = self._request(
+            "DELETE",
+            "/api/v1/relations/link",
+            json={"from_uri": from_uri, "to_uri": to_uri},
+        )
+        result = data.get("result", data)
+        return result if isinstance(result, dict) else {}
 
     def get_relations(self, uri: str) -> list[dict[str, Any]]:
         """GET /api/v1/relations — per the confirmed live response shape:
