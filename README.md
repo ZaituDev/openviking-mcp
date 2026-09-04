@@ -80,7 +80,7 @@ uses `to_uris`, not `uris`.
 
 ## Reciprocal Relations & Storage Format
 
-Relations form a verified bidirectional graph connecting project knowledge resources using native OpenViking endpoints (`POST /api/v1/relations` and `POST /api/v1/relations/unlink`).
+Relations form a verified bidirectional graph connecting project knowledge resources using native OpenViking endpoints (`POST /api/v1/relations/link` and `DELETE /api/v1/relations/link`).
 
 Relations are established and maintained in reciprocal pairs between concrete `.md` files.
 

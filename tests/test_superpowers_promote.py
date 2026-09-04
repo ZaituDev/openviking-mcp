@@ -36,6 +36,7 @@ class FakeOpenVikingClient:
         self.write_fail_uris: set[str] = set()
         self.delete_fail_uris: set[str] = set()
         self.read_fail_uris: set[str] = set()
+        self.stat_fail_uris: dict[str, OpenVikingError] = {}
         self.corrupt_read_after_write: dict[str, str] = {}
 
     def __enter__(self) -> "FakeOpenVikingClient":
@@ -51,7 +52,7 @@ class FakeOpenVikingClient:
         if uri in self.read_fail_uris:
             raise OpenVikingError(f"Backend read failed for {uri}")
         if uri not in self.files:
-            raise OpenVikingError(f"File not found: {uri}")
+            raise OpenVikingError(f"File not found: {uri}", code="NOT_FOUND")
         return self.files[uri]
 
     def write(self, uri: str, content: str, mode: str = "replace") -> dict:
@@ -65,8 +66,10 @@ class FakeOpenVikingClient:
         return {}
 
     def stat_resource(self, uri: str) -> dict:
+        if uri in self.stat_fail_uris:
+            raise self.stat_fail_uris[uri]
         if uri not in self.files:
-            raise OpenVikingError(f"Resource not found: {uri}")
+            raise OpenVikingError(f"Resource not found: {uri}", code="NOT_FOUND")
         return {
             "name": uri.rsplit("/", 1)[-1],
             "size": len(self.files[uri]),
@@ -549,6 +552,24 @@ class PromoteDecisionEditL2Tests(unittest.TestCase):
             self.assertFalse(res["ok"])
             self.assertEqual(res["error"]["code"], "TARGET_EXISTS")
             self.assertEqual(self.client.read(target_uri), "# Existing")
+
+    def test_create_mode_fails_fast_on_stat_backend_failure(self) -> None:
+        target_uri = "viking://resources/project/architecture/doc.md"
+        self.client.stat_fail_uris[target_uri] = OpenVikingError("500 Internal Server Error", code="INTERNAL_ERROR")
+
+        with patch.object(superpowers_server, "OpenVikingClient", return_value=self.client):
+            res = superpowers_server.promote_decision(
+                dec_uri=self.dec_uri,
+                action="edit_l2",
+                target="architecture",
+                target_path="doc.md",
+                write_mode="create",
+                content="# New",
+            )
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"]["code"], "BACKEND_FAILURE")
+            self.assertIn("Failed to check target existence", res["error"]["message"])
+            self.assertNotIn(target_uri, self.client.files)
 
     def test_create_mode_verification_failure_deletes_new_file(self) -> None:
         target_uri = "viking://resources/project/architecture/doc.md"

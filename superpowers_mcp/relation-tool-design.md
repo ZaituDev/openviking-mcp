@@ -62,7 +62,7 @@ Every endpoint participating in a relation must satisfy strict path validation:
 
 ## 2. Storage Format & Serialization
 
-Relations are natively stored in OpenViking via the standard `POST /api/v1/relations` endpoint using the single `reason` string field.
+Relations are natively stored in OpenViking via the standard `POST /api/v1/relations/link` endpoint using the single `reason` string field (and unlinked via `DELETE /api/v1/relations/link`).
 
 ### Format Convention
 

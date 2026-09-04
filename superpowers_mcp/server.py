@@ -502,8 +502,20 @@ def promote_decision(
                 try:
                     stat = client.stat_resource(full_target_uri)
                     exists = True
-                except OpenVikingError:
-                    exists = False
+                except OpenVikingError as exc:
+                    if getattr(exc, "code", None) == "NOT_FOUND" or "404" in str(exc) or "not found" in str(exc).lower():
+                        exists = False
+                    else:
+                        return {
+                            "ok": False,
+                            "action": "edit_l2",
+                            "dec_uri": dec_uri,
+                            "changed": False,
+                            "error": {
+                                "code": "BACKEND_FAILURE",
+                                "message": f"Failed to check target existence: {exc}",
+                            },
+                        }
 
                 if exists:
                     return {
